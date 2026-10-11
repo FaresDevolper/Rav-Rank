@@ -21,8 +21,8 @@ from PIL import Image, ImageDraw, ImageFont
 # الاعدادات الاساسية
 # ============================================================
 
-TOKEN = os.getenv("TOKEN")
-MONGO_URI = os.getenv("MONGO_URI")
+TOKEN = os.getenv("TOKEN") or os.getenv("DISCORD_TOKEN")
+MONGO_URI = os.getenv("MONGO_URI") or os.getenv("MONGO_URL")
 
 # اياردي السيرفر
 GUILD_ID = 1425195739591610451
