@@ -40,7 +40,7 @@ IGNORED_ROLE_IDS = []
 
 # حالة البوت البنفسجية ستريمنج
 STREAM_NAME = "Rav Pulse"
-STREAM_URL = "https://www.Rav Store .tv/ravserver"
+STREAM_URL = "https://www.twitch.tv/ravserver"
 
 # ------------------------------------------------------------
 # اكسبي الشات والصوت
