@@ -14,7 +14,7 @@ from discord.ext import commands, tasks
 from aiohttp import web
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import UpdateOne
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageOps
 
 
 # ============================================================
@@ -93,6 +93,22 @@ QUEST_POOL = [
 # ------------------------------------------------------------
 BEIGE = 0xD8C3A5
 BACKGROUND_PATH = "leaderboard.png"
+
+# سبب الترقية الذي يظهر في بطاقة الترقية حسب مصدر الاكسبي
+LEVEL_REASONS = {
+    "chat": "Chat activity",
+    "voice": "Voice activity",
+    "other": "Presence in the server",
+    "admin": "Staff adjustment",
+}
+
+# الوان بطاقة الترقية
+CARD_WIDTH = 1000
+CARD_HEIGHT = 380
+CARD_DEEP = (20, 14, 8)
+CARD_ACCENT = (216, 195, 165)
+CARD_SOFT = (240, 228, 208)
+CARD_MUTED = (170, 155, 130)
 
 
 # ============================================================
@@ -251,18 +267,9 @@ async def sync_level_roles(member, level):
         print(f"roles error {e}")
 
 
-async def on_level_up(member, old, new):
+async def on_level_up(member, old, new, reason="other"):
     await sync_level_roles(member, new)
-    embed = discord.Embed(title="ترقية مستوى", color=BEIGE)
-    embed.add_field(name="المستوى السابق", value=str(old), inline=True)
-    embed.add_field(name="المستوى الحالي", value=str(new), inline=True)
-    embed.set_thumbnail(url=member.display_avatar.url)
-    if member.guild.icon:
-        embed.set_footer(text=member.guild.name, icon_url=member.guild.icon.url)
-    else:
-        embed.set_footer(text=member.guild.name)
-    content = f"{member.mention} بسبب تواجدك في السيرفر تمت ترقيتك إلى مستوى {new} بعد ما كنت في مستوى {old}"
-    await send_announce(content=content, embed=embed)
+    await send_levelup_card(member, old, new, reason)
 
 
 # ============================================================
@@ -319,7 +326,7 @@ async def award_xp(member, amount, source, extra=1.0, use_mult=True, add_msgs=0,
         await users.replace_one({"_id": member.id}, doc, upsert=True)
     await add_pulse(amount)
     if new_level > old_level:
-        await on_level_up(member, old_level, new_level)
+        await on_level_up(member, old_level, new_level, source)
     return amount
 
 
@@ -338,7 +345,7 @@ async def change_xp(member, mode, value):
         await users.replace_one({"_id": member.id}, doc, upsert=True)
     new_level = doc["level"]
     if new_level > old_level:
-        await on_level_up(member, old_level, new_level)
+        await on_level_up(member, old_level, new_level, "admin")
     elif new_level < old_level:
         await sync_level_roles(member, new_level)
     return doc["xp"], new_level
@@ -393,10 +400,14 @@ async def quest_event(member, qid, inc=1, unique=None):
         await award_xp(member, quest["reward"], "other", use_mult=False)
         if QUEST_ANNOUNCE:
             text = quest["text"].format(t=quest["target"])
-            await send_announce(
-                content=f"{member.mention} أنجزت مهمة {text} وحصلت على {quest['reward']} اكسبي",
-                allowed=discord.AllowedMentions.none(),
+            embed = discord.Embed(
+                title="مهمة منجزة",
+                description=f"{member.mention}\n{text}",
+                color=BEIGE,
             )
+            embed.add_field(name="المكافأة", value=f"{quest['reward']} اكسبي", inline=True)
+            embed.set_thumbnail(url=member.display_avatar.url)
+            await send_announce(embed=embed, allowed=discord.AllowedMentions.none())
 
 
 # ============================================================
@@ -435,15 +446,24 @@ async def flush_bonds():
 
 async def handle_bond_up(guild, a_id, b_id, level, announce=True):
     reward = 60 + 40 * level
+    first = None
     for uid in (a_id, b_id):
         member = guild.get_member(uid)
         if member:
+            if first is None:
+                first = member
             await award_xp(member, reward, "other", use_mult=False)
     if announce:
-        await send_announce(
-            content=f"<@{a_id}> و <@{b_id}> ارتفع رابطكم إلى المستوى {level} وحصل كل واحد منكم على {reward} اكسبي",
-            allowed=discord.AllowedMentions.none(),
+        embed = discord.Embed(
+            title="ارتقاء رابط",
+            description=f"<@{a_id}> و <@{b_id}>",
+            color=BEIGE,
         )
+        embed.add_field(name="المستوى الجديد", value=str(level), inline=True)
+        embed.add_field(name="مكافأة كل واحد", value=f"{reward} اكسبي", inline=True)
+        if first is not None:
+            embed.set_thumbnail(url=first.display_avatar.url)
+        await send_announce(embed=embed, allowed=discord.AllowedMentions.none())
 
 
 # ============================================================
@@ -592,11 +612,11 @@ async def build_rank_embed(guild, member):
     return embed
 
 
-async def fetch_avatar(member):
+async def fetch_avatar(member, size=128):
     if member is None:
         return None
     try:
-        return await member.display_avatar.replace(size=128, format="png").read()
+        return await member.display_avatar.replace(size=size, format="png").read()
     except Exception:
         return None
 
@@ -624,6 +644,193 @@ def fit_text(draw, text, font, max_width):
         text = text[:-1]
     return text
 
+
+# ------------------------------------------------------------
+# بطاقة الترقية
+# ------------------------------------------------------------
+
+def card_background(width, height):
+    if os.path.exists(BACKGROUND_PATH):
+        try:
+            bg = Image.open(BACKGROUND_PATH).convert("RGB")
+            bg = ImageOps.fit(bg, (width, height))
+            bg = bg.filter(ImageFilter.GaussianBlur(8))
+            return Image.blend(bg, Image.new("RGB", (width, height), CARD_DEEP), 0.78)
+        except Exception:
+            pass
+    bg = Image.new("RGB", (width, height), CARD_DEEP)
+    gd = ImageDraw.Draw(bg)
+    for y in range(height):
+        t = y / height
+        gd.line([(0, y), (width, y)], fill=(int(46 - 24 * t), int(34 - 18 * t), int(22 - 12 * t)))
+    return bg
+
+
+def card_glow(base, cx, cy, radius, blur, alpha):
+    layer = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    ImageDraw.Draw(layer).ellipse(
+        (cx - radius, cy - radius, cx + radius, cy + radius),
+        fill=CARD_ACCENT + (alpha,),
+    )
+    layer = layer.filter(ImageFilter.GaussianBlur(blur))
+    return Image.alpha_composite(base, layer)
+
+
+def card_circle(image, diameter):
+    image = ImageOps.fit(image, (diameter, diameter))
+    scale = 4
+    mask = Image.new("L", (diameter * scale, diameter * scale), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, diameter * scale - 1, diameter * scale - 1), fill=255)
+    mask = mask.resize((diameter, diameter), Image.LANCZOS)
+    output = Image.new("RGBA", (diameter, diameter), (0, 0, 0, 0))
+    output.paste(image, (0, 0), mask)
+    return output
+
+
+def card_digit_size(value, base):
+    digits = len(str(value))
+    if digits <= 2:
+        return base
+    if digits == 3:
+        return int(base * 0.8)
+    return int(base * 0.62)
+
+
+def build_levelup_card(avatar_bytes, username, old_level, new_level, reason, guild_name):
+    width, height = CARD_WIDTH, CARD_HEIGHT
+    base = card_background(width, height).convert("RGBA")
+
+    avatar_x, avatar_y, avatar_r = 150, 190, 110
+    old_x, new_x, level_y = 410, 700, 205
+    left, right = 310, 960
+    middle = (left + right) // 2
+
+    base = card_glow(base, avatar_x, avatar_y, 140, 40, 120)
+    base = card_glow(base, new_x, level_y, 62, 22, 140)
+    d = ImageDraw.Draw(base)
+
+    avatar = None
+    if avatar_bytes:
+        try:
+            avatar = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA")
+        except Exception:
+            avatar = None
+    if avatar is None:
+        avatar = Image.new("RGBA", (256, 256), (90, 75, 55, 255))
+    avatar = card_circle(avatar, avatar_r * 2)
+
+    ring = 8
+    d.ellipse(
+        (avatar_x - avatar_r - ring, avatar_y - avatar_r - ring, avatar_x + avatar_r + ring, avatar_y + avatar_r + ring),
+        fill=CARD_ACCENT,
+    )
+    base.paste(avatar, (avatar_x - avatar_r, avatar_y - avatar_r), avatar)
+    d = ImageDraw.Draw(base)
+
+    d.text((left, 30), "LEVEL UP", font=load_font(34), fill=CARD_ACCENT, anchor="la")
+    d.text((right, 36), latin_only(guild_name, "Rav"), font=load_font(24), fill=CARD_MUTED, anchor="ra")
+
+    f_name = load_font(50)
+    name = fit_text(d, "@" + latin_only(username), f_name, right - left)
+    d.text((left, 76), name, font=f_name, fill=(255, 255, 255), anchor="la")
+
+    d.line([(left, 150), (right, 150)], fill=(90, 74, 54), width=2)
+
+    d.ellipse(
+        (old_x - 42, level_y - 42, old_x + 42, level_y + 42),
+        fill=(34, 26, 18),
+        outline=(120, 100, 75),
+        width=4,
+    )
+    d.text(
+        (old_x, level_y),
+        str(old_level),
+        font=load_font(card_digit_size(old_level, 40)),
+        fill=CARD_MUTED,
+        anchor="mm",
+    )
+
+    d.line([(old_x + 70, level_y), (new_x - 100, level_y)], fill=CARD_ACCENT, width=6)
+    d.polygon(
+        [(new_x - 72, level_y), (new_x - 98, level_y - 17), (new_x - 98, level_y + 17)],
+        fill=CARD_ACCENT,
+    )
+
+    d.ellipse(
+        (new_x - 52, level_y - 52, new_x + 52, level_y + 52),
+        fill=CARD_ACCENT,
+        outline=CARD_SOFT,
+        width=4,
+    )
+    d.text(
+        (new_x, level_y),
+        str(new_level),
+        font=load_font(card_digit_size(new_level, 54)),
+        fill=CARD_DEEP,
+        anchor="mm",
+    )
+
+    f_label = load_font(22)
+    d.text((old_x, 266), "PREVIOUS LEVEL", font=f_label, fill=CARD_MUTED, anchor="ma")
+    d.text((new_x, 266), "CURRENT LEVEL", font=f_label, fill=CARD_ACCENT, anchor="ma")
+
+    d.rounded_rectangle(
+        (left, 316, right, 364),
+        radius=24,
+        fill=(36, 28, 20),
+        outline=(110, 90, 65),
+        width=2,
+    )
+    f_reason = load_font(26)
+    reason_text = fit_text(d, f"Reason: {reason}", f_reason, right - left - 40)
+    d.text((middle, 340), reason_text, font=f_reason, fill=(255, 255, 255), anchor="mm")
+
+    d.rounded_rectangle((1, 1, width - 2, height - 2), radius=36, outline=(150, 125, 90), width=3)
+    mask = Image.new("L", (width, height), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, width - 1, height - 1), radius=36, fill=255)
+    base.putalpha(mask)
+
+    buffer = io.BytesIO()
+    base.save(buffer, format="PNG")
+    buffer.seek(0)
+    return buffer
+
+
+async def send_levelup_card(member, old, new, reason):
+    channel = await get_announce_channel()
+    if channel is None:
+        return
+    try:
+        avatar_bytes = await fetch_avatar(member, 256)
+        reason_text = LEVEL_REASONS.get(reason, LEVEL_REASONS["other"])
+        buffer = await asyncio.to_thread(
+            build_levelup_card,
+            avatar_bytes,
+            member.name,
+            old,
+            new,
+            reason_text,
+            member.guild.name,
+        )
+        file = discord.File(buffer, filename="levelup.png")
+        embed = discord.Embed(color=BEIGE)
+        embed.set_image(url="attachment://levelup.png")
+        await channel.send(
+            content=member.mention,
+            embed=embed,
+            file=file,
+            allowed_mentions=discord.AllowedMentions(users=True),
+        )
+    except Exception as e:
+        print(f"levelup card error {e}")
+        await send_announce(
+            content=f"{member.mention} بسبب تواجدك في السيرفر تمت ترقيتك إلى مستوى {new} بعد ما كنت في مستوى {old}"
+        )
+
+
+# ------------------------------------------------------------
+# لوحة المتصدرين
+# ------------------------------------------------------------
 
 def build_leaderboard_image(rows, guild_name):
     width, height = 1280, 860
