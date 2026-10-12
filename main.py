@@ -76,16 +76,17 @@ BOND_ANNOUNCE_LIMIT = 3
 
 # ------------------------------------------------------------
 # المهام اليومية
+# النص العربي يظهر في امر /quests والنص الانجليزي en يظهر في بطاقة المهمة
 # ------------------------------------------------------------
 QUEST_ANNOUNCE = True
 TZ_OFFSET_HOURS = 3
 
 QUEST_POOL = [
-    {"id": "chat", "text": "أرسل {t} رسالة في الشات", "target": 30, "reward": 150},
-    {"id": "voice", "text": "اقضِ {t} دقيقة في الرومات الصوتية", "target": 30, "reward": 220},
-    {"id": "people", "text": "تفاعل مع {t} أشخاص مختلفين في الشات", "target": 3, "reward": 180},
-    {"id": "replies", "text": "احصل على {t} ردود من الأعضاء على رسائلك", "target": 5, "reward": 200},
-    {"id": "partners", "text": "اجلس في الصوت مع {t} أشخاص مختلفين", "target": 3, "reward": 200},
+    {"id": "chat", "text": "أرسل {t} رسالة في الشات", "en": "Send {t} messages in chat", "target": 30, "reward": 150},
+    {"id": "voice", "text": "اقضِ {t} دقيقة في الرومات الصوتية", "en": "Spend {t} minutes in voice channels", "target": 30, "reward": 220},
+    {"id": "people", "text": "تفاعل مع {t} أشخاص مختلفين في الشات", "en": "Chat with {t} different people", "target": 3, "reward": 180},
+    {"id": "replies", "text": "احصل على {t} ردود من الأعضاء على رسائلك", "en": "Get {t} replies to your messages", "target": 5, "reward": 200},
+    {"id": "partners", "text": "اجلس في الصوت مع {t} أشخاص مختلفين", "en": "Join voice with {t} different people", "target": 3, "reward": 200},
 ]
 
 # ------------------------------------------------------------
@@ -102,7 +103,7 @@ LEVEL_REASONS = {
     "admin": "Staff adjustment",
 }
 
-# الوان بطاقة الترقية
+# الوان البطاقات
 CARD_WIDTH = 1000
 CARD_HEIGHT = 380
 CARD_DEEP = (20, 14, 8)
@@ -245,6 +246,17 @@ async def send_announce(content=None, embed=None, allowed=None):
         await channel.send(content=content, embed=embed, allowed_mentions=allowed)
     except Exception as e:
         print(f"announce error {e}")
+
+
+async def send_card_message(content, buffer, filename, allowed):
+    """يرسل صورة البطاقة داخل ايمبد بنفس شكل بطاقة الترقية"""
+    channel = await get_announce_channel()
+    if channel is None:
+        return
+    file = discord.File(buffer, filename=filename)
+    embed = discord.Embed(color=BEIGE)
+    embed.set_image(url=f"attachment://{filename}")
+    await channel.send(content=content, embed=embed, file=file, allowed_mentions=allowed)
 
 
 async def sync_level_roles(member, level):
@@ -399,15 +411,33 @@ async def quest_event(member, qid, inc=1, unique=None):
     if finished:
         await award_xp(member, quest["reward"], "other", use_mult=False)
         if QUEST_ANNOUNCE:
-            text = quest["text"].format(t=quest["target"])
-            embed = discord.Embed(
-                title="مهمة منجزة",
-                description=f"{member.mention}\n{text}",
-                color=BEIGE,
-            )
-            embed.add_field(name="المكافأة", value=f"{quest['reward']} اكسبي", inline=True)
-            embed.set_thumbnail(url=member.display_avatar.url)
-            await send_announce(embed=embed, allowed=discord.AllowedMentions.none())
+            await send_quest_card(member, quest)
+
+
+async def send_quest_card(member, quest):
+    try:
+        avatar_bytes = await fetch_avatar(member, 256)
+        text_en = quest["en"].format(t=quest["target"])
+        buffer = await asyncio.to_thread(
+            build_quest_card,
+            avatar_bytes,
+            member.name,
+            text_en,
+            quest["reward"],
+            member.guild.name,
+        )
+        await send_card_message(member.mention, buffer, "quest.png", discord.AllowedMentions.none())
+    except Exception as e:
+        print(f"quest card error {e}")
+        text = quest["text"].format(t=quest["target"])
+        embed = discord.Embed(
+            title="مهمة منجزة",
+            description=f"{member.mention}\n{text}",
+            color=BEIGE,
+        )
+        embed.add_field(name="المكافأة", value=f"{quest['reward']} اكسبي", inline=True)
+        embed.set_thumbnail(url=member.display_avatar.url)
+        await send_announce(embed=embed, allowed=discord.AllowedMentions.none())
 
 
 # ============================================================
@@ -446,14 +476,33 @@ async def flush_bonds():
 
 async def handle_bond_up(guild, a_id, b_id, level, announce=True):
     reward = 60 + 40 * level
-    first = None
-    for uid in (a_id, b_id):
-        member = guild.get_member(uid)
+    member_a = guild.get_member(a_id)
+    member_b = guild.get_member(b_id)
+    for member in (member_a, member_b):
         if member:
-            if first is None:
-                first = member
             await award_xp(member, reward, "other", use_mult=False)
     if announce:
+        await send_bond_card(guild, a_id, b_id, member_a, member_b, level, reward)
+
+
+async def send_bond_card(guild, a_id, b_id, member_a, member_b, level, reward):
+    try:
+        avatar_a, avatar_b = await asyncio.gather(fetch_avatar(member_a, 256), fetch_avatar(member_b, 256))
+        name_a = member_a.name if member_a else "User"
+        name_b = member_b.name if member_b else "User"
+        buffer = await asyncio.to_thread(
+            build_bond_card,
+            avatar_a,
+            avatar_b,
+            name_a,
+            name_b,
+            level,
+            reward,
+            guild.name,
+        )
+        await send_card_message(f"<@{a_id}> <@{b_id}>", buffer, "bond.png", discord.AllowedMentions.none())
+    except Exception as e:
+        print(f"bond card error {e}")
         embed = discord.Embed(
             title="ارتقاء رابط",
             description=f"<@{a_id}> و <@{b_id}>",
@@ -461,6 +510,7 @@ async def handle_bond_up(guild, a_id, b_id, level, announce=True):
         )
         embed.add_field(name="المستوى الجديد", value=str(level), inline=True)
         embed.add_field(name="مكافأة كل واحد", value=f"{reward} اكسبي", inline=True)
+        first = member_a or member_b
         if first is not None:
             embed.set_thumbnail(url=first.display_avatar.url)
         await send_announce(embed=embed, allowed=discord.AllowedMentions.none())
@@ -645,8 +695,29 @@ def fit_text(draw, text, font, max_width):
     return text
 
 
+def wrap_text(draw, text, font, max_width, max_lines=2):
+    words = text.split()
+    lines = []
+    current = ""
+    for word in words:
+        test = (current + " " + word).strip()
+        if draw.textlength(test, font=font) <= max_width:
+            current = test
+        else:
+            if current:
+                lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    if not lines:
+        return [""]
+    lines = lines[:max_lines]
+    lines[-1] = fit_text(draw, lines[-1], font, max_width)
+    return lines
+
+
 # ------------------------------------------------------------
-# بطاقة الترقية
+# عناصر مشتركة بين البطاقات
 # ------------------------------------------------------------
 
 def card_background(width, height):
@@ -695,6 +766,98 @@ def card_digit_size(value, base):
         return int(base * 0.8)
     return int(base * 0.62)
 
+
+def draw_avatar(base, avatar_bytes, cx, cy, radius, ring=8):
+    """يرسم صورة دائرية بإطار بيج حول نقطة معينة"""
+    avatar = None
+    if avatar_bytes:
+        try:
+            avatar = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA")
+        except Exception:
+            avatar = None
+    if avatar is None:
+        avatar = Image.new("RGBA", (256, 256), (90, 75, 55, 255))
+    avatar = card_circle(avatar, radius * 2)
+    d = ImageDraw.Draw(base)
+    d.ellipse(
+        (cx - radius - ring, cy - radius - ring, cx + radius + ring, cy + radius + ring),
+        fill=CARD_ACCENT,
+    )
+    base.paste(avatar, (cx - radius, cy - radius), avatar)
+
+
+def draw_header(d, title, guild_name, left, right):
+    d.text((left, 30), title, font=load_font(34), fill=CARD_ACCENT, anchor="la")
+    d.text((right, 36), latin_only(guild_name, "Rav"), font=load_font(24), fill=CARD_MUTED, anchor="ra")
+
+
+def draw_pill(d, text, left, right):
+    d.rounded_rectangle(
+        (left, 316, right, 364),
+        radius=24,
+        fill=(36, 28, 20),
+        outline=(110, 90, 65),
+        width=2,
+    )
+    f_pill = load_font(26)
+    text = fit_text(d, text, f_pill, right - left - 40)
+    d.text(((left + right) // 2, 340), text, font=f_pill, fill=(255, 255, 255), anchor="mm")
+
+
+def draw_level_transition(d, old_value, new_value, old_x, new_x, y, old_label, new_label):
+    d.ellipse(
+        (old_x - 42, y - 42, old_x + 42, y + 42),
+        fill=(34, 26, 18),
+        outline=(120, 100, 75),
+        width=4,
+    )
+    d.text(
+        (old_x, y),
+        str(old_value),
+        font=load_font(card_digit_size(old_value, 40)),
+        fill=CARD_MUTED,
+        anchor="mm",
+    )
+    d.line([(old_x + 70, y), (new_x - 100, y)], fill=CARD_ACCENT, width=6)
+    d.polygon(
+        [(new_x - 72, y), (new_x - 98, y - 17), (new_x - 98, y + 17)],
+        fill=CARD_ACCENT,
+    )
+    d.ellipse(
+        (new_x - 52, y - 52, new_x + 52, y + 52),
+        fill=CARD_ACCENT,
+        outline=CARD_SOFT,
+        width=4,
+    )
+    d.text(
+        (new_x, y),
+        str(new_value),
+        font=load_font(card_digit_size(new_value, 54)),
+        fill=CARD_DEEP,
+        anchor="mm",
+    )
+    f_label = load_font(22)
+    d.text((old_x, 266), old_label, font=f_label, fill=CARD_MUTED, anchor="ma")
+    d.text((new_x, 266), new_label, font=f_label, fill=CARD_ACCENT, anchor="ma")
+
+
+def card_finish(base):
+    """يرسم الاطار الخارجي ويقص الزوايا ويرجع الصورة جاهزة للارسال"""
+    width, height = base.size
+    d = ImageDraw.Draw(base)
+    d.rounded_rectangle((1, 1, width - 2, height - 2), radius=36, outline=(150, 125, 90), width=3)
+    mask = Image.new("L", (width, height), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, width - 1, height - 1), radius=36, fill=255)
+    base.putalpha(mask)
+    buffer = io.BytesIO()
+    base.save(buffer, format="PNG")
+    buffer.seek(0)
+    return buffer
+
+
+# ------------------------------------------------------------
+# بطاقة الترقية
+# ------------------------------------------------------------
 
 def build_levelup_card(avatar_bytes, username, old_level, new_level, reason, guild_name):
     width, height = CARD_WIDTH, CARD_HEIGHT
@@ -826,6 +989,95 @@ async def send_levelup_card(member, old, new, reason):
         await send_announce(
             content=f"{member.mention} بسبب تواجدك في السيرفر تمت ترقيتك إلى مستوى {new} بعد ما كنت في مستوى {old}"
         )
+
+
+# ------------------------------------------------------------
+# بطاقة ارتقاء الرابط
+# ------------------------------------------------------------
+
+def build_bond_card(avatar_a, avatar_b, name_a, name_b, level, reward, guild_name):
+    width, height = CARD_WIDTH, CARD_HEIGHT
+    base = card_background(width, height).convert("RGBA")
+
+    left, right = 360, 960
+    old_x, new_x, level_y = 490, 770, 205
+    ax, bx, ay, radius = 125, 245, 190, 85
+
+    base = card_glow(base, (ax + bx) // 2, ay, 150, 40, 110)
+    base = card_glow(base, new_x, level_y, 62, 22, 140)
+
+    draw_avatar(base, avatar_a, ax, ay, radius)
+    draw_avatar(base, avatar_b, bx, ay, radius)
+    d = ImageDraw.Draw(base)
+
+    draw_header(d, "BOND UP", guild_name, left, right)
+
+    f_name = load_font(36)
+    names = f"@{latin_only(name_a)}  &  @{latin_only(name_b)}"
+    names = fit_text(d, names, f_name, right - left)
+    d.text((left, 82), names, font=f_name, fill=(255, 255, 255), anchor="la")
+
+    d.line([(left, 150), (right, 150)], fill=(90, 74, 54), width=2)
+
+    draw_level_transition(d, max(0, level - 1), level, old_x, new_x, level_y, "PREVIOUS BOND", "CURRENT BOND")
+    draw_pill(d, f"Reward: +{reward} XP each", left, right)
+
+    return card_finish(base)
+
+
+# ------------------------------------------------------------
+# بطاقة المهمة المنجزة
+# ------------------------------------------------------------
+
+def build_quest_card(avatar_bytes, username, quest_text, reward, guild_name):
+    width, height = CARD_WIDTH, CARD_HEIGHT
+    base = card_background(width, height).convert("RGBA")
+
+    avatar_x, avatar_y, avatar_r = 150, 190, 110
+    left, right = 310, 960
+    check_x, check_y = left + 48, 232
+
+    base = card_glow(base, avatar_x, avatar_y, 140, 40, 120)
+    base = card_glow(base, check_x, check_y, 60, 22, 140)
+
+    draw_avatar(base, avatar_bytes, avatar_x, avatar_y, avatar_r)
+    d = ImageDraw.Draw(base)
+
+    draw_header(d, "QUEST COMPLETE", guild_name, left, right)
+
+    f_name = load_font(50)
+    name = fit_text(d, "@" + latin_only(username), f_name, right - left)
+    d.text((left, 76), name, font=f_name, fill=(255, 255, 255), anchor="la")
+
+    d.line([(left, 150), (right, 150)], fill=(90, 74, 54), width=2)
+
+    # دائرة العلامة الصح
+    d.ellipse(
+        (check_x - 46, check_y - 46, check_x + 46, check_y + 46),
+        fill=CARD_ACCENT,
+        outline=CARD_SOFT,
+        width=4,
+    )
+    d.line(
+        [(check_x - 20, check_y + 1), (check_x - 6, check_y + 16), (check_x + 22, check_y - 16)],
+        fill=CARD_DEEP,
+        width=9,
+        joint="curve",
+    )
+
+    # نص المهمة
+    text_x = left + 115
+    d.text((text_x, 172), "DAILY QUEST", font=load_font(22), fill=CARD_MUTED, anchor="la")
+    f_quest = load_font(32)
+    lines = wrap_text(d, quest_text, f_quest, right - text_x, max_lines=2)
+    y = 206
+    for line in lines:
+        d.text((text_x, y), line, font=f_quest, fill=(255, 255, 255), anchor="la")
+        y += 42
+
+    draw_pill(d, f"Reward: +{reward} XP", left, right)
+
+    return card_finish(base)
 
 
 # ------------------------------------------------------------
